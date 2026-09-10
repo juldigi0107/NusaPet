@@ -102,6 +102,23 @@ jobs:
               # Keep all original source presets in game/; staged web build needs only its full preset.
               p=stage/'export_presets.cfg';s=p.read_text();pos=s.index('[preset.6]')
               p.write_text(s[pos:].replace('[preset.6]','[preset.0]').replace('[preset.6.options]','[preset.0.options]'))
+              # Follow-up diagnostics: native Object.tr collision, undeclared local,
+              # and success returns accidentally scoped under an inline RecoveryManager if.
+              edit('scripts/core/GameState.gd', '        care_avg=', '        var care_avg: float =')
+              for p in stage.rglob('*.gd'):
+                  source = p.read_text()
+                  updated = source.replace('GameState.tr(', 'GameState.localize(')
+                  if p == stage/'scripts/core/GameState.gd':
+                      updated = re.sub(r'\btr\(', 'localize(', updated)
+                  if source != updated:
+                      p.write_text(updated)
+                      changes.append(str(p.relative_to(stage)))
+              edit('scripts/core/GameState.gd',
+                   '_touch(); _transactional_save("ARMOR"); if RecoveryManager: RecoveryManager.complete(); AudioManager.play_generated_tone("SFX",AudioManager.identity_for_affinity(affinity),.18); state_changed.emit(); toast_requested.emit(localize("toast_armor")); return true',
+                   '_touch()\n    _transactional_save("ARMOR")\n    if RecoveryManager:\n        RecoveryManager.complete()\n    AudioManager.play_generated_tone("SFX",AudioManager.identity_for_affinity(affinity),.18)\n    state_changed.emit()\n    toast_requested.emit(localize("toast_armor"))\n    return true')
+              edit('scripts/core/GameState.gd',
+                   '_evaluate_progression(); _touch(); _transactional_save("PERFECT_RESONANCE"); if RecoveryManager: RecoveryManager.complete(); state_changed.emit(); toast_requested.emit("Perfect Resonance tercapai."); return true',
+                   '_evaluate_progression()\n    _touch()\n    _transactional_save("PERFECT_RESONANCE")\n    if RecoveryManager:\n        RecoveryManager.complete()\n    state_changed.emit()\n    toast_requested.emit("Perfect Resonance tercapai.")\n    return true')
               report={'patched_files':sorted(set(changes)),'inferred_declarations_made_dynamic':inferred,
                       'original_source_untouched':True,'content_removed':False}
               (stage.parent.parent/'patch-report.json').write_text(json.dumps(report,indent=2))
