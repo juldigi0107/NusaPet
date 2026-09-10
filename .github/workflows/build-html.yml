@@ -119,6 +119,23 @@ jobs:
               edit('scripts/core/GameState.gd',
                    '_evaluate_progression(); _touch(); _transactional_save("PERFECT_RESONANCE"); if RecoveryManager: RecoveryManager.complete(); state_changed.emit(); toast_requested.emit("Perfect Resonance tercapai."); return true',
                    '_evaluate_progression()\n    _touch()\n    _transactional_save("PERFECT_RESONANCE")\n    if RecoveryManager:\n        RecoveryManager.complete()\n    state_changed.emit()\n    toast_requested.emit("Perfect Resonance tercapai.")\n    return true')
+              # Export preset requests both desktop and mobile compressed textures.
+              # Enable their import formats before the editor import pass.
+              project_path = stage/'project.godot'
+              project_text = project_path.read_text()
+              rendering_marker = '[rendering]'
+              assert project_text.count(rendering_marker) == 1
+              project_text = project_text.replace(rendering_marker, rendering_marker + '\ntextures/vram_compression/import_s3tc_bptc=true\ntextures/vram_compression/import_etc2_astc=true', 1)
+              project_path.write_text(project_text)
+              # Resolve the custom shell to an actual file for export validation.
+              preset_path = stage/'export_presets.cfg'
+              preset_text = preset_path.read_text()
+              shell_path = (stage/'web/shell.html').resolve()
+              assert shell_path.is_file(), 'Custom HTML shell is missing'
+              preset_text = preset_text.replace('html/custom_html_shell="res://web/shell.html"', 'html/custom_html_shell=' + json.dumps(str(shell_path)))
+              preset_path.write_text(preset_text)
+              changes.append('project.godot')
+              changes.append('export_presets.cfg')
               report={'patched_files':sorted(set(changes)),'inferred_declarations_made_dynamic':inferred,
                       'original_source_untouched':True,'content_removed':False}
               (stage.parent.parent/'patch-report.json').write_text(json.dumps(report,indent=2))
@@ -131,9 +148,30 @@ jobs:
           # Inject the patch before Godot sees the generated stage, including --prepare-only mode.
           import inspect
           s=s.replace(marker,inspect.getsource(apply)+'\napply(stage)\n'+marker)
+          s=s.replace("[executable]+command", "[executable, '--verbose']+command")
           builder.write_text(s)
           PY_FIX
           python3 /tmp/nusapet-source-fix.py
+      - name: Check installed Web templates
+        shell: bash
+        run: |
+          python3 - <<'PY_TEMPLATES'
+          from pathlib import Path
+          import os, json, zipfile
+          data_home = Path(os.environ.get('XDG_DATA_HOME', str(Path.home()/'.local/share')))
+          folder = data_home/'godot/export_templates/4.3.stable'
+          files = sorted(folder.glob('*'))
+          report = {'template_directory': str(folder), 'templates': [{'name': p.name, 'bytes': p.stat().st_size} for p in files if p.is_file()]}
+          Path('_nusapet_build/NusaPet_HTML_Export/template-report.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          for name in ['web_nothreads_release.zip']:
+              file = folder/name
+              if not file.is_file():
+                  raise SystemExit('Missing single-thread Web template: '+str(file))
+              with zipfile.ZipFile(file) as archive:
+                  bad = archive.testzip()
+                  if bad: raise SystemExit('Corrupt Web template entry: '+bad)
+          PY_TEMPLATES
       - name: Export complete game
         working-directory: _nusapet_build/NusaPet_HTML_Export
         run: python3 tools/build_web.py --godot /tmp/godot-bin/Godot_v4.3-stable_linux.x86_64
@@ -151,4 +189,7 @@ jobs:
           path: |
             _nusapet_build/NusaPet_HTML_Export/build-step-*.log
             _nusapet_build/NusaPet_HTML_Export/patch-report.json
+            _nusapet_build/NusaPet_HTML_Export/template-report.json
+            _nusapet_build/NusaPet_HTML_Export/.build/game/project.godot
+            _nusapet_build/NusaPet_HTML_Export/.build/game/export_presets.cfg
           if-no-files-found: ignore
