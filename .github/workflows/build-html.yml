@@ -30,6 +30,93 @@ jobs:
           unzip -q /tmp/templates.zip -d /tmp/godot-templates
           mkdir -p ~/.local/share/godot/export_templates/4.3.stable
           cp -a /tmp/godot-templates/templates/. ~/.local/share/godot/export_templates/4.3.stable/
+      - name: Fix Godot source errors from build diagnostics
+        shell: bash
+        run: |
+          cat > /tmp/nusapet-source-fix.py <<'PY_FIX'
+          import pathlib,re,json
+          
+          def apply(stage):
+              changes=[]
+              def edit(rel,old,new):
+                  p=stage/rel;s=p.read_text()
+                  if s.count(old)!=1: raise RuntimeError('Unexpected source for '+rel+' : '+old[:70])
+                  p.write_text(s.replace(old,new,1));changes.append(rel)
+              edit('scripts/core/GameState.gd',
+                   'return [str(x.id) for x in weighted.slice(0,min(5,weighted.size())) if float(x.weight)>=0.5]',
+                   'return weighted.slice(0,min(5,weighted.size())).filter(func(x): return float(x.weight)>=0.5).map(func(x): return str(x.id))')
+              edit('scripts/core/GameState.gd','[str(x.get("personality","Unknown")) for x in team.slice(0,3)]',
+                   'team.slice(0,3).map(func(x): return str(x.get("personality","Unknown")))')
+              edit('scripts/share_card.gd','[str(x) for x in pet.get("evolution_history",[])]',
+                   'pet.get("evolution_history",[]).map(func(x): return str(x))')
+              edit('scripts/adapters/CloudSaveAdapter.gd',
+                   'push_finished.emit(result==HTTPRequest.RESULT_SUCCESS and code>=200 and code<300,code,parsed if typeof(parsed)==TYPE_DICTIONARY else {}))',
+                   'push_finished.emit(result==HTTPRequest.RESULT_SUCCESS and code>=200 and code<300,code,parsed if typeof(parsed)==TYPE_DICTIONARY else {})')
+              p=stage/'scripts/main.gd';s=p.read_text();lines=s.splitlines(keepends=True)
+              count=0
+              for i,line in enumerate(lines):
+                  if 'var more:=Label.new()' in line:
+                      lines[i]=re.sub(r'\bmore\b','memory_summary',line);count+=1
+              assert count==1
+              p.write_text(''.join(lines));changes.append('scripts/main.gd')
+              p=stage/'scripts/creature_animation_controller.gd';s=p.read_text()
+              for old,new in [
+                ('rotation_track_insert_key(track, 0.0, base)','rotation_track_insert_key(track, 0.0, Quaternion.from_euler(base))'),
+                ('rotation_track_insert_key(track, anim.length * 0.5, base + Vector3(0, amp * sin(phase), amp))','rotation_track_insert_key(track, anim.length * 0.5, Quaternion.from_euler(base + Vector3(0, amp * sin(phase), amp)))'),
+                ('rotation_track_insert_key(track, anim.length, base)','rotation_track_insert_key(track, anim.length, Quaternion.from_euler(base))')]:
+                  assert s.count(old)==1;s=s.replace(old,new)
+              p.write_text(s);changes.append(str(p.relative_to(stage)))
+              edit('tests/run_unit_tests.gd','    old_legacy:=gs.state.legacy.archive.size()',
+                   '    var old_legacy=gs.state.legacy.archive.size()')
+              # Dictionary-backed game data are dynamic. Do not infer static types from them.
+              # Explicit type annotations stay intact; inferred declarations become dynamic.
+              # Only modify code tokens, never comments or quoted strings.
+              inferred=0
+              pattern=re.compile(r'\bvar\s+[A-Za-z_][A-Za-z_0-9]*\s*:=')
+              def dynamic_code(s):
+                  nonlocal inferred
+                  out=[];start=0;i=0
+                  def convert(code):
+                      nonlocal inferred
+                      inferred+=len(pattern.findall(code))
+                      return pattern.sub(lambda m:m.group().replace(':=','='),code)
+                  while i<len(s):
+                      if s[i]=='#' or s[i] in ('"',"'"):
+                          out.append(convert(s[start:i]))
+                          j=i
+                          if s[i]=='#':
+                              end=s.find('\n',i);i=len(s) if end<0 else end
+                          else:
+                              delim=s[i]*3 if s.startswith(s[i]*3,i) else s[i]
+                              i+=len(delim)
+                              while i<len(s):
+                                  if s[i]=='\\':i+=2;continue
+                                  if s.startswith(delim,i):i+=len(delim);break
+                                  i+=1
+                          out.append(s[j:i]);start=i
+                      else:i+=1
+                  out.append(convert(s[start:]));return ''.join(out)
+              for p in stage.rglob('*.gd'):
+                  s=p.read_text();t=dynamic_code(s)
+                  if s!=t:p.write_text(t);changes.append(str(p.relative_to(stage)))
+              # Keep all original source presets in game/; staged web build needs only its full preset.
+              p=stage/'export_presets.cfg';s=p.read_text();pos=s.index('[preset.6]')
+              p.write_text(s[pos:].replace('[preset.6]','[preset.0]').replace('[preset.6.options]','[preset.0.options]'))
+              report={'patched_files':sorted(set(changes)),'inferred_declarations_made_dynamic':inferred,
+                      'original_source_untouched':True,'content_removed':False}
+              (stage.parent.parent/'patch-report.json').write_text(json.dumps(report,indent=2))
+              print('Applied syntax/type/animation fixes:',len(set(changes)),'files')
+          
+          builder=pathlib.Path('_nusapet_build/NusaPet_HTML_Export/tools/build_web.py')
+          s=builder.read_text()
+          marker="print('Staged source: all original content retained; browser compatibility patches applied.')"
+          assert s.count(marker)==1
+          # Inject the patch before Godot sees the generated stage, including --prepare-only mode.
+          import inspect
+          s=s.replace(marker,inspect.getsource(apply)+'\napply(stage)\n'+marker)
+          builder.write_text(s)
+          PY_FIX
+          python3 /tmp/nusapet-source-fix.py
       - name: Export complete game
         working-directory: _nusapet_build/NusaPet_HTML_Export
         run: python3 tools/build_web.py --godot /tmp/godot-bin/Godot_v4.3-stable_linux.x86_64
@@ -44,5 +131,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: NusaPet-build-diagnostics
-          path: _nusapet_build/NusaPet_HTML_Export/build-step-*.log
+          path: |
+            _nusapet_build/NusaPet_HTML_Export/build-step-*.log
+            _nusapet_build/NusaPet_HTML_Export/patch-report.json
           if-no-files-found: ignore
