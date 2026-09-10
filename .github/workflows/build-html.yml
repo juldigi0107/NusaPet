@@ -1,0 +1,48 @@
+name: Build NusaPet HTML
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "NusaPet_Part1.zip"
+      - "NusaPet_Part2.zip"
+      - ".github/workflows/build-html.yml"
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and unpack both complete-content parts
+        shell: bash
+        run: |
+          echo "12f07798bb285af55131e516163b83ad4f872758bef608205f4844146eac8cf0  NusaPet_Part1.zip" | sha256sum --check
+          echo "56e797a9cebc31a7c24a9ae134983378933906d26632b4b1fb67b85648083b14  NusaPet_Part2.zip" | sha256sum --check
+          unzip -q NusaPet_Part1.zip -d _nusapet_build
+          unzip -q NusaPet_Part2.zip -d _nusapet_build
+      - name: Install Godot and matching export templates
+        shell: bash
+        run: |
+          curl --fail --location --retry 3 -o /tmp/godot.zip https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot-bin
+          chmod +x /tmp/godot-bin/Godot_v4.3-stable_linux.x86_64
+          curl --fail --location --retry 3 -o /tmp/templates.zip https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          unzip -q /tmp/templates.zip -d /tmp/godot-templates
+          mkdir -p ~/.local/share/godot/export_templates/4.3.stable
+          cp -a /tmp/godot-templates/templates/. ~/.local/share/godot/export_templates/4.3.stable/
+      - name: Export complete game
+        working-directory: _nusapet_build/NusaPet_HTML_Export
+        run: python3 tools/build_web.py --godot /tmp/godot-bin/Godot_v4.3-stable_linux.x86_64
+      - name: Upload playable export
+        uses: actions/upload-artifact@v4
+        with:
+          name: NusaPet-HTML
+          path: _nusapet_build/NusaPet_HTML_Export/dist/
+          if-no-files-found: error
+      - name: Preserve build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NusaPet-build-diagnostics
+          path: _nusapet_build/NusaPet_HTML_Export/build-step-*.log
+          if-no-files-found: ignore
